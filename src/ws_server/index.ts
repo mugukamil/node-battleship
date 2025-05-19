@@ -23,6 +23,7 @@ type Ship = {
     length: number;
     type: "small" | "medium" | "large" | "huge";
     hits?: number;
+    hitCells?: { x: number; y: number }[]; // Track hit cells
 };
 
 type GamePlayer = {
@@ -145,6 +146,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
             const { indexRoom } = JSON.parse(msg.data);
             const room = rooms[indexRoom];
             if (!room || room.roomUsers.length !== 1) return;
+            if (room.roomUsers.some((u) => u.index === player.index)) return; // Prevent adding self
             room.roomUsers.push(player);
             // Remove room from available rooms
             updateRoomAll();
@@ -221,8 +223,14 @@ function handleCommand(ws: WebSocket, msg: Message) {
                 const cells = getShipCells(ship);
                 for (const cell of cells) {
                     if (cell.x === x && cell.y === y) {
+                        if (!ship.hitCells) ship.hitCells = [];
+                        // If this cell was already hit, treat as miss for this ship, but keep checking others
+                        if (ship.hitCells.some((hc) => hc.x === x && hc.y === y)) {
+                            continue;
+                        }
+                        ship.hitCells.push({ x, y });
                         ship.hits = (ship.hits || 0) + 1;
-                        if (ship.hits === ship.length) {
+                        if (ship.hitCells.length === ship.length) {
                             status = "killed";
                             killedShip = ship;
                         } else {
@@ -231,7 +239,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
                         break;
                     }
                 }
-                if (status !== "miss") break;
+                if (status === "shot" || status === "killed") break;
             }
             // Send attack result to both
             for (const p of game.players) {
@@ -321,9 +329,9 @@ function getShipCells(ship: Ship): { x: number; y: number }[] {
     const cells = [];
     for (let i = 0; i < ship.length; i++) {
         if (ship.direction) {
-            cells.push({ x: ship.position.x + i, y: ship.position.y });
-        } else {
             cells.push({ x: ship.position.x, y: ship.position.y + i });
+        } else {
+            cells.push({ x: ship.position.x + i, y: ship.position.y });
         }
     }
     return cells;
