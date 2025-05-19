@@ -1,8 +1,7 @@
-// @ts-ignore: Suppress missing ws type error if @types/ws is not installed
 import { WebSocketServer, WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
 
-const PORT = 8080;
+const PORT = 3000;
 
 // --- Types ---
 type Player = {
@@ -70,11 +69,13 @@ function updateRoomAll() {
             roomId: r.roomId,
             roomUsers: r.roomUsers.map((u) => ({ name: u.name, index: u.index })),
         }));
-    broadcastAll({ type: "update_room", data: roomList, id: 0 });
+    const data = { type: "update_room", data: JSON.stringify(roomList), id: 0 };
+    broadcastAll(data);
 }
 function updateWinnersAll() {
-    const table = Object.entries(winners).map(([name, wins]) => ({ name, wins }));
-    broadcastAll({ type: "update_winners", data: table, id: 0 });
+    const table = JSON.stringify(Object.entries(winners).map(([name, wins]) => ({ name, wins })));
+    const data = { type: "update_winners", data: table, id: 0 };
+    broadcastAll(data);
 }
 function logCommand(cmd: any, result: any) {
     console.log("Received:", cmd);
@@ -104,7 +105,7 @@ wss.on("connection", (ws: WebSocket) => {
 function handleCommand(ws: WebSocket, msg: Message) {
     switch (msg.type) {
         case "reg": {
-            const { name, password } = msg.data;
+            const { name, password } = JSON.parse(msg.data);
             let error = false,
                 errorText = "";
             let player = Object.values(players).find((p) => p.name === name);
@@ -120,7 +121,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
             if (player) player.ws = ws;
             const result = {
                 type: "reg",
-                data: { name, index: player?.index, error, errorText },
+                data: JSON.stringify({ name, index: player?.index, error, errorText }),
                 id: 0,
             };
             send(ws, result);
@@ -141,7 +142,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
         case "add_user_to_room": {
             const player = Object.values(players).find((p) => p.ws === ws);
             if (!player) return;
-            const { indexRoom } = msg.data;
+            const { indexRoom } = JSON.parse(msg.data);
             const room = rooms[indexRoom];
             if (!room || room.roomUsers.length !== 1) return;
             room.roomUsers.push(player);
@@ -165,7 +166,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
             for (const gp of gamePlayers) {
                 send(gp.player.ws!, {
                     type: "create_game",
-                    data: { idGame, idPlayer: gp.id },
+                    data: JSON.stringify({ idGame, idPlayer: gp.id }),
                     id: 0,
                 });
             }
@@ -173,7 +174,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
             break;
         }
         case "add_ships": {
-            const { gameId, ships, indexPlayer } = msg.data;
+            const { gameId, ships, indexPlayer } = JSON.parse(msg.data);
             const game = games[gameId];
             if (!game) return;
             const gp = game.players.find((p) => p.id === indexPlayer);
@@ -185,10 +186,10 @@ function handleCommand(ws: WebSocket, msg: Message) {
                 for (const p of game.players) {
                     send(p.player.ws!, {
                         type: "start_game",
-                        data: {
+                        data: JSON.stringify({
                             ships: p.ships,
                             currentPlayerIndex: p.id,
-                        },
+                        }),
                         id: 0,
                     });
                 }
@@ -197,7 +198,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
                 for (const p of game.players) {
                     send(p.player.ws!, {
                         type: "turn",
-                        data: { currentPlayer: current.id },
+                        data: JSON.stringify({ currentPlayer: current.id }),
                         id: 0,
                     });
                 }
@@ -207,7 +208,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
         }
         case "attack":
         case "randomAttack": {
-            const { gameId, x, y, indexPlayer } = msg.data;
+            const { gameId, x, y, indexPlayer } = JSON.parse(msg.data);
             const game = games[gameId];
             if (!game || game.finished) return;
             const attackerIdx = game.players.findIndex((p) => p.id === indexPlayer);
@@ -236,22 +237,54 @@ function handleCommand(ws: WebSocket, msg: Message) {
             for (const p of game.players) {
                 send(p.player.ws!, {
                     type: "attack",
-                    data: {
+                    data: JSON.stringify({
                         position: { x, y },
                         currentPlayer: indexPlayer,
                         status,
-                    },
+                    }),
                     id: 0,
                 });
             }
-            // If killed, mark all cells around as miss (not implemented in detail here)
+            // If killed, mark all cells around as miss
+            if (status === "killed" && killedShip) {
+                const cells = getShipCells(killedShip);
+                const missCells: { x: number; y: number }[] = [];
+                for (const cell of cells) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                        for (let dy = -1; dy <= 1; dy++) {
+                            const mx = cell.x + dx;
+                            const my = cell.y + dy;
+                            // Don't mark the ship's own cells
+                            if (cells.some((c) => c.x === mx && c.y === my)) continue;
+                            // Don't duplicate
+                            if (missCells.some((c) => c.x === mx && c.y === my)) continue;
+                            // Board bounds (optional, assuming 10x10)
+                            if (mx < 0 || mx > 9 || my < 0 || my > 9) continue;
+                            missCells.push({ x: mx, y: my });
+                        }
+                    }
+                }
+                for (const missCell of missCells) {
+                    for (const p of game.players) {
+                        send(p.player.ws!, {
+                            type: "attack",
+                            data: JSON.stringify({
+                                position: missCell,
+                                currentPlayer: indexPlayer,
+                                status: "miss",
+                            }),
+                            id: 0,
+                        });
+                    }
+                }
+            }
             // Check win
             if (defender.ships.every((s) => (s.hits || 0) === s.length)) {
                 game.finished = true;
                 for (const p of game.players) {
                     send(p.player.ws!, {
                         type: "finish",
-                        data: { winPlayer: indexPlayer },
+                        data: JSON.stringify({ winPlayer: indexPlayer }),
                         id: 0,
                     });
                 }
@@ -271,7 +304,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
             for (const p of game.players) {
                 send(p.player.ws!, {
                     type: "turn",
-                    data: { currentPlayer: current.id },
+                    data: JSON.stringify({ currentPlayer: current.id }),
                     id: 0,
                 });
             }
