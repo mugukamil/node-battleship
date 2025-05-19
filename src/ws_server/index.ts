@@ -1,56 +1,17 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
+import { Player, players } from "./user.js";
+import { Room, rooms } from "./room.js";
+import { Ship, getShipCells } from "./ship.js";
+import { GamePlayer, games, winners } from "./game.js";
 
 const PORT = 3000;
-
-// --- Types ---
-type Player = {
-    name: string;
-    password: string;
-    index: string;
-    wins: number;
-    ws?: WebSocket;
-};
-
-type Room = {
-    roomId: string;
-    roomUsers: Player[];
-};
-
-type Ship = {
-    position: { x: number; y: number };
-    direction: boolean;
-    length: number;
-    type: "small" | "medium" | "large" | "huge";
-    hits?: number;
-    hitCells?: { x: number; y: number }[]; // Track hit cells
-};
-
-type GamePlayer = {
-    player: Player;
-    ships: Ship[];
-    id: string;
-    ready: boolean;
-};
-
-type Game = {
-    id: string;
-    players: GamePlayer[];
-    currentPlayer: number;
-    finished: boolean;
-};
 
 type Message = {
     type: string;
     data: any;
     id: number;
 };
-
-// --- In-memory DB ---
-const players: Record<string, Player> = {};
-const rooms: Record<string, Room> = {};
-const games: Record<string, Game> = {};
-const winners: Record<string, number> = {};
 
 // --- Helper Functions ---
 function send(ws: WebSocket, msg: any) {
@@ -65,10 +26,10 @@ function broadcastAll(msg: any) {
 }
 function updateRoomAll() {
     const roomList = Object.values(rooms)
-        .filter((r) => r.roomUsers.length === 1)
-        .map((r) => ({
+        .filter((r: Room) => r.roomUsers.length === 1)
+        .map((r: Room) => ({
             roomId: r.roomId,
-            roomUsers: r.roomUsers.map((u) => ({ name: u.name, index: u.index })),
+            roomUsers: r.roomUsers.map((u: Player) => ({ name: u.name, index: u.index })),
         }));
     const data = { type: "update_room", data: JSON.stringify(roomList), id: 0 };
     broadcastAll(data);
@@ -109,7 +70,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
             const { name, password } = JSON.parse(msg.data);
             let error = false,
                 errorText = "";
-            let player = Object.values(players).find((p) => p.name === name);
+            let player = Object.values(players).find((p: Player) => p.name === name);
             if (!player) {
                 const index = randomUUID();
                 player = { name, password, index, wins: 0, ws };
@@ -132,7 +93,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
             break;
         }
         case "create_room": {
-            const player = Object.values(players).find((p) => p.ws === ws);
+            const player = Object.values(players).find((p: Player) => p.ws === ws);
             if (!player) return;
             const roomId = randomUUID();
             rooms[roomId] = { roomId, roomUsers: [player] };
@@ -141,18 +102,18 @@ function handleCommand(ws: WebSocket, msg: Message) {
             break;
         }
         case "add_user_to_room": {
-            const player = Object.values(players).find((p) => p.ws === ws);
+            const player = Object.values(players).find((p: Player) => p.ws === ws);
             if (!player) return;
             const { indexRoom } = JSON.parse(msg.data);
             const room = rooms[indexRoom];
             if (!room || room.roomUsers.length !== 1) return;
-            if (room.roomUsers.some((u) => u.index === player.index)) return; // Prevent adding self
+            if (room.roomUsers.some((u: Player) => u.index === player.index)) return; // Prevent adding self
             room.roomUsers.push(player);
             // Remove room from available rooms
             updateRoomAll();
             // Create game
             const idGame = randomUUID();
-            const gamePlayers: GamePlayer[] = room.roomUsers.map((p) => ({
+            const gamePlayers: GamePlayer[] = room.roomUsers.map((p: Player) => ({
                 player: p,
                 ships: [],
                 id: randomUUID(),
@@ -179,12 +140,12 @@ function handleCommand(ws: WebSocket, msg: Message) {
             const { gameId, ships, indexPlayer } = JSON.parse(msg.data);
             const game = games[gameId];
             if (!game) return;
-            const gp = game.players.find((p) => p.id === indexPlayer);
+            const gp = game.players.find((p: GamePlayer) => p.id === indexPlayer);
             if (!gp) return;
             gp.ships = ships;
             gp.ready = true;
             // If both ready, start game
-            if (game.players.every((p) => p.ready)) {
+            if (game.players.every((p: GamePlayer) => p.ready)) {
                 for (const p of game.players) {
                     send(p.player.ws!, {
                         type: "start_game",
@@ -210,10 +171,54 @@ function handleCommand(ws: WebSocket, msg: Message) {
         }
         case "attack":
         case "randomAttack": {
-            const { gameId, x, y, indexPlayer } = JSON.parse(msg.data);
+            let x: number, y: number, gameId: string, indexPlayer: string;
+            if (msg.type === "randomAttack") {
+                ({ gameId, indexPlayer } = JSON.parse(msg.data));
+                const game = games[gameId];
+                if (!game || game.finished) return;
+                const attackerIdx = game.players.findIndex((p: GamePlayer) => p.id === indexPlayer);
+                if (attackerIdx !== game.currentPlayer) return;
+                const defenderIdx = 1 - attackerIdx;
+                const defender = game.players[defenderIdx];
+                // Collect all possible cells that have not been hit or missed
+                const boardSize = 10;
+                const allCells: { x: number; y: number }[] = [];
+                // Build a set of all attacked cells (hit or miss)
+                const attackedCells = new Set<string>();
+                for (const ship of defender.ships) {
+                    if (ship.hitCells) {
+                        for (const hc of ship.hitCells) {
+                            attackedCells.add(`${hc.x},${hc.y}`);
+                        }
+                    }
+                }
+                // Also add all miss cells (from both players' attacks)
+                for (const ship of game.players[attackerIdx].ships) {
+                    if (ship.hitCells) {
+                        for (const hc of ship.hitCells) {
+                            attackedCells.add(`${hc.x},${hc.y}`);
+                        }
+                    }
+                }
+                // Add all board cells not yet attacked
+                for (let cx = 0; cx < boardSize; cx++) {
+                    for (let cy = 0; cy < boardSize; cy++) {
+                        if (!attackedCells.has(`${cx},${cy}`)) {
+                            allCells.push({ x: cx, y: cy });
+                        }
+                    }
+                }
+                if (allCells.length === 0) return;
+                const randCell = allCells[Math.floor(Math.random() * allCells.length)];
+                x = randCell.x;
+                y = randCell.y;
+            } else {
+                ({ gameId, x, y, indexPlayer } = JSON.parse(msg.data));
+            }
+            // ...existing attack logic...
             const game = games[gameId];
             if (!game || game.finished) return;
-            const attackerIdx = game.players.findIndex((p) => p.id === indexPlayer);
+            const attackerIdx = game.players.findIndex((p: GamePlayer) => p.id === indexPlayer);
             if (attackerIdx !== game.currentPlayer) return;
             const defenderIdx = 1 - attackerIdx;
             const defender = game.players[defenderIdx];
@@ -225,7 +230,11 @@ function handleCommand(ws: WebSocket, msg: Message) {
                     if (cell.x === x && cell.y === y) {
                         if (!ship.hitCells) ship.hitCells = [];
                         // If this cell was already hit, treat as miss for this ship, but keep checking others
-                        if (ship.hitCells.some((hc) => hc.x === x && hc.y === y)) {
+                        if (
+                            ship.hitCells.some(
+                                (hc: { x: number; y: number }) => hc.x === x && hc.y === y,
+                            )
+                        ) {
                             continue;
                         }
                         ship.hitCells.push({ x, y });
@@ -263,9 +272,19 @@ function handleCommand(ws: WebSocket, msg: Message) {
                             const mx = cell.x + dx;
                             const my = cell.y + dy;
                             // Don't mark the ship's own cells
-                            if (cells.some((c) => c.x === mx && c.y === my)) continue;
+                            if (
+                                cells.some(
+                                    (c: { x: number; y: number }) => c.x === mx && c.y === my,
+                                )
+                            )
+                                continue;
                             // Don't duplicate
-                            if (missCells.some((c) => c.x === mx && c.y === my)) continue;
+                            if (
+                                missCells.some(
+                                    (c: { x: number; y: number }) => c.x === mx && c.y === my,
+                                )
+                            )
+                                continue;
                             // Board bounds (optional, assuming 10x10)
                             if (mx < 0 || mx > 9 || my < 0 || my > 9) continue;
                             missCells.push({ x: mx, y: my });
@@ -287,7 +306,7 @@ function handleCommand(ws: WebSocket, msg: Message) {
                 }
             }
             // Check win
-            if (defender.ships.every((s) => (s.hits || 0) === s.length)) {
+            if (defender.ships.every((s: Ship) => (s.hits || 0) === s.length)) {
                 game.finished = true;
                 for (const p of game.players) {
                     send(p.player.ws!, {
@@ -322,19 +341,6 @@ function handleCommand(ws: WebSocket, msg: Message) {
         default:
             break;
     }
-}
-
-// --- Ship helpers ---
-function getShipCells(ship: Ship): { x: number; y: number }[] {
-    const cells = [];
-    for (let i = 0; i < ship.length; i++) {
-        if (ship.direction) {
-            cells.push({ x: ship.position.x, y: ship.position.y + i });
-        } else {
-            cells.push({ x: ship.position.x + i, y: ship.position.y });
-        }
-    }
-    return cells;
 }
 
 // --- Graceful shutdown ---
